@@ -38,7 +38,7 @@
   <div class="sub" id="s">HTS Solar Enerji · Sanal Tur</div>
   <div class="bar"><i id="bar"></i></div>
   <div class="pct" id="pct">0%</div>
-  <div class="note" id="n">Etkileşimli 3D tur yükleniyor (yaklaşık 115 MB). En iyi deneyim için masaüstü bilgisayarda güncel Chrome, Edge, Firefox veya Safari önerilir.</div>
+  <div class="note" id="n">Etkileşimli 3D tur yükleniyor. İlk açılış bağlantıya göre biraz sürebilir; sonraki açılışlar çok daha hızlıdır. En iyi deneyim için masaüstü bilgisayarda güncel Chrome, Edge, Firefox veya Safari önerilir.</div>
 </div>
 <div id="warn" hidden></div>
 <script>
@@ -48,7 +48,7 @@
     document.documentElement.lang = 'en';
     document.getElementById('t').textContent = 'Twin Villa';
     document.getElementById('s').textContent = 'HTS Solar Enerji · Virtual Tour';
-    document.getElementById('n').textContent = 'Loading the interactive 3D tour (about 115 MB). For the best experience use a current Chrome, Edge, Firefox or Safari on a desktop computer.';
+    document.getElementById('n').textContent = 'Loading the interactive 3D tour. The first visit can take a little while; later visits are much faster. For the best experience use a current Chrome, Edge, Firefox or Safari on a desktop computer.';
     document.getElementById('back').textContent = '← Twin Villa';
     document.title = 'Twin Villa · Virtual Tour';
   }
@@ -56,15 +56,23 @@
   function fail(m) { warn.textContent = m; warn.hidden = false; }
   function setP(p) { var v = Math.max(0, Math.min(100, Math.round(p * 100))); bar.style.width = v + '%'; pct.textContent = v + '%'; }
 
-  // The Unity data file (105 MB) is split into parts below GitHub's file-size limit; they are joined here in the browser.
-  var DATA = ['parts/data_00.bin','parts/data_01.bin','parts/data_02.bin','parts/data_03.bin','parts/data_04.bin','parts/data_05.bin','parts/data_06.bin','parts/data_07.bin'];
-  var CODE = ['parts/code_00.bin'];
-  var total = 104978893 + 10150272, got = 0;
-
-  function fetchParts(list) {
+  // The Unity data file is split into parts below GitHub's file-size limit; they are joined here in the browser.
+  // Parts are kept in the browser's Cache Storage, so later visits load from disk instead of the network.
+  var M = null, total = 1, got = 0, CACHE = 'ikiz-villa-tour';
+  function lowEndGpu() {
+    try { var gl = document.createElement('canvas').getContext('webgl2') || document.createElement('canvas').getContext('webgl');
+      var e = gl.getExtension('WEBGL_debug_renderer_info'); var r = (e ? gl.getParameter(e.UNMASKED_RENDERER_WEBGL) : '') + '';
+      return /intel|uhd|iris|mali|adreno|powervr|apple|swiftshader|llvmpipe|basic render/i.test(r); } catch (x) { return false; }
+  }
+  function getPart(u, cache) {
+    var url = u + '?v=' + M.version;
+    var net = function () { return fetch(url).then(function (r) { if (!r.ok) throw new Error(u + ' ' + r.status); if (cache) cache.put(url, r.clone()).catch(function () {}); return r; }); };
+    if (!cache) return net();
+    return cache.match(url).then(function (hit) { return hit || net(); }).catch(net);
+  }
+  function fetchParts(list, cache) {
     return Promise.all(list.map(function (u) {
-      return fetch(u).then(function (r) {
-        if (!r.ok) throw new Error(u + ' ' + r.status);
+      return getPart(u, cache).then(function (r) {
         var rd = r.body.getReader(), ch = [];
         function pump() { return rd.read().then(function (x) { if (x.done) return new Blob(ch); ch.push(x.value); got += x.value.length; setP(got / total * 0.92); return pump(); }); }
         return pump();
@@ -75,7 +83,16 @@
     if (!('DecompressionStream' in window)) throw new Error('nodecomp');
     return new Response(blob.stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
   }
-  Promise.all([fetchParts(DATA).then(gunzip), fetchParts(CODE).then(gunzip)]).then(function (res) {
+    fetch('parts/manifest.json', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (m) {
+    M = m; total = m.dataSize + m.codeSize;
+    if (!('caches' in window)) return null;
+    var name = CACHE + '-' + m.version;
+    return caches.keys().then(function (ks) { return Promise.all(ks.filter(function (k) { return k.indexOf(CACHE) === 0 && k !== name; }).map(function (k) { return caches.delete(k); })); })
+      .then(function () { return caches.open(name); }).catch(function () { return null; });
+  }).then(function (cache) {
+    var DATA = M.data.map(function (f) { return 'parts/' + f; }), CODE = M.code.map(function (f) { return 'parts/' + f; });
+    return Promise.all([fetchParts(DATA, cache).then(gunzip), fetchParts(CODE, cache).then(gunzip)]);
+  }).then(function (res) {
     var dataBuf = res[0], codeBuf = res[1], realFetch = window.fetch.bind(window);
     window.fetch = function (input, init) {
       var u = typeof input === 'string' ? input : (input && input.url) || '';
@@ -84,12 +101,12 @@
       return realFetch(input, init);
     };
     var s = document.createElement('script');
-    s.src = 'Build/loader.js';
+    s.src = 'Build/loader.js?v=' + M.version;
     s.onload = function () {
       var mobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
       createUnityInstance(document.getElementById('unity-canvas'), {
-        dataUrl: 'villa.data', frameworkUrl: 'Build/framework.js', codeUrl: 'villa.wasm', streamingAssetsUrl: 'StreamingAssets',
-        devicePixelRatio: Math.min(window.devicePixelRatio || 1, mobile ? 1.5 : 1.75),
+        dataUrl: 'villa.data', frameworkUrl: 'Build/framework.js?v=' + M.version, codeUrl: 'villa.wasm', streamingAssetsUrl: 'StreamingAssets',
+        devicePixelRatio: lowEndGpu() ? 1 : Math.min(window.devicePixelRatio || 1, mobile ? 1.5 : 1.75),
         showBanner: function (m, t) { if (t === 'error') fail(m); }
       }, function (p) { setP(0.92 + p * 0.08); }).then(function (inst) {
         window.villaTour = inst; setP(1);
